@@ -323,3 +323,210 @@ QHeaderView::section {
 QHeaderView::section:last {
     border-right: none;
 }
+
+/* 分组框组件样式 */
+QGroupBox {
+    font-weight: 600;
+    color: #1E293B;
+    border: 1px solid #CBD5E1;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding-top: 12px;
+    padding-left: 8px;
+    padding-right: 8px;
+    padding-bottom: 8px;
+    background-color: transparent;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    color: #1E293B;
+    background-color: #F8FAFC;
+}
+
+/* 选项卡控件与标签页 */
+QTabWidget {
+    background-color: transparent;
+    border: none;
+}
+
+QTabWidget::pane {
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-radius: 8px;
+    top: -1px;
+    padding: 6px;
+}
+
+QTabWidget > QWidget {
+    background-color: transparent;
+}
+
+QTabBar {
+    background: transparent;
+    qproperty-drawBase: 0;
+}
+
+QTabBar::tab {
+    background-color: #F1F5F9;
+    color: #475569;
+    border: 1px solid #CBD5E1;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 7px 16px;
+    margin-right: 4px;
+    font-weight: 500;
+    font-size: 12px;
+}
+
+QTabBar::tab:hover {
+    background-color: #E2E8F0;
+    color: #0F172A;
+}
+
+QTabBar::tab:selected {
+    background-color: #FFFFFF;
+    color: #2563EB;
+    border-color: #CBD5E1;
+    border-bottom: 2px solid #2563EB;
+    font-weight: 600;
+}
+
+QTabBar::tab:disabled {
+    background-color: #F8FAFC;
+    color: #94A3B8;
+}
+
+/* 单选框与复选框 */
+QRadioButton, QCheckBox {
+    spacing: 6px;
+    color: #334155;
+    font-size: 13px;
+    background-color: transparent;
+}
+
+QRadioButton:hover, QCheckBox:hover {
+    color: #0F172A;
+}
+
+QRadioButton:disabled, QCheckBox:disabled {
+    color: #94A3B8;
+}
+
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    border: 1px solid #CBD5E1;
+    background-color: #FFFFFF;
+}
+
+QRadioButton::indicator:hover {
+    border-color: #2563EB;
+}
+
+QRadioButton::indicator:checked {
+    background-color: #2563EB;
+    border: 1px solid #2563EB;
+    image: url("assets/check_white.svg");
+}
+
+QRadioButton::indicator:checked:disabled {
+    background-color: #94A3B8;
+    border-color: #94A3B8;
+    image: url("assets/check_white.svg");
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid #CBD5E1;
+    background-color: #FFFFFF;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #2563EB;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #2563EB;
+    border: 1px solid #2563EB;
+    image: url("assets/check_white.svg");
+}
+
+QCheckBox::indicator:checked:disabled {
+    background-color: #94A3B8;
+    border-color: #94A3B8;
+    image: url("assets/check_white.svg");
+}
+
+/* 滑块控件 */
+QSlider::groove:horizontal {
+    border: none;
+    height: 4px;
+    background: #CBD5E1;
+    border-radius: 2px;
+}
+
+QSlider::sub-page:horizontal {
+    background: #2563EB;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    background: #2563EB;
+    border: 2px solid #FFFFFF;
+    width: 16px;
+    margin-top: -6px;
+    margin-bottom: -6px;
+    border-radius: 8px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #1D4ED8;
+}
+
+/* 语义化标签与卡片容器 */
+QLabel[secondary="true"] {
+    color: #64748B;
+}
+
+QLabel[accent="true"] {
+    color: #2563EB;
+}
+
+QLabel[danger="true"] {
+    color: #DC2626;
+}
+
+QLabel[card_title="true"] {
+    color: #0F172A;
+    font-weight: 600;
+}
+
+QFrame[card="true"] {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 8px;
+}
+
+QFrame[card_accent="true"] {
+    background-color: #F8FAFC;
+    border: 1px solid #CBD5E1;
+    border-radius: 8px;
+}
+
+QLabel[info_banner="true"] {
+    background-color: #F1F5F9;
+    border: 1px solid #E2E8F0;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #334155;
+}
+

@@ -59,10 +59,9 @@ class SplitDialog(QDialog):
         if parent is not None and hasattr(parent, "styleSheet") and parent.styleSheet():
             self.setStyleSheet(parent.styleSheet())
         else:
-            style_path = ResourceUtils.get_resource_path(os.path.join("assets", "style_light.qss"))
-            if os.path.isfile(style_path):
-                with open(style_path, "r", encoding="utf-8") as f:
-                    self.setStyleSheet(f.read())
+            content = ResourceUtils.load_stylesheet("style_light.qss")
+            if content:
+                self.setStyleSheet(content)
 
     def _init_ui(self, initial_split_page: int) -> None:
         """
@@ -86,13 +85,14 @@ class SplitDialog(QDialog):
         # 2. 原文档基本信息
         file_name = os.path.basename(self._source_path) if self._source_path else "未命名文档"
         lbl_info = QLabel(f"当前源文件：{file_name}（共 {self._total_pages} 页）")
-        lbl_info.setStyleSheet("background: #F1F5F9; border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px 12px; font-size: 12px; color: #334155;")
+        lbl_info.setProperty("info_banner", "true")
         layout.addWidget(lbl_info)
 
         # 判断是否可拆分
         if self._total_pages < 2:
             lbl_warning = QLabel("当前文档总页数少于 2 页，无法拆分为两个独立的 PDF 文件。")
-            lbl_warning.setStyleSheet("color: #DC2626; font-size: 13px; font-weight: bold; margin: 20px 0;")
+            lbl_warning.setProperty("danger", "true")
+            lbl_warning.setStyleSheet("font-size: 13px; font-weight: bold; margin: 20px 0;")
             layout.addWidget(lbl_warning)
             btn_close = QPushButton("关闭")
             btn_close.clicked.connect(self.reject)
@@ -101,13 +101,14 @@ class SplitDialog(QDialog):
 
         # 3. 拆分控制区（滑块 + 微调框）
         split_box = QFrame()
-        split_box.setStyleSheet("background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px;")
+        split_box.setProperty("card", "true")
+        split_box.setStyleSheet("padding: 12px;")
         split_layout = QVBoxLayout(split_box)
         split_layout.setContentsMargins(12, 12, 12, 12)
         split_layout.setSpacing(8)
 
         lbl_split_prompt = QLabel("拆分位置选择（在选定页面之后切开）：")
-        lbl_split_prompt.setStyleSheet("font-weight: 600; color: #1E293B;")
+        lbl_split_prompt.setStyleSheet("font-weight: 600;")
         split_layout.addWidget(lbl_split_prompt)
 
         ctrl_layout = QHBoxLayout()
@@ -145,13 +146,14 @@ class SplitDialog(QDialog):
         # 4. 拆分结果两卡片预览与输出路径配置
         # 卡片 1：前半部分
         card1 = QFrame()
-        card1.setStyleSheet("background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px;")
+        card1.setProperty("card_accent", "true")
         card1_layout = QVBoxLayout(card1)
         card1_layout.setContentsMargins(12, 10, 12, 10)
         card1_layout.setSpacing(6)
 
         self.lbl_part1_summary = QLabel()
-        self.lbl_part1_summary.setStyleSheet("font-weight: bold; color: #2563EB;")
+        self.lbl_part1_summary.setProperty("accent", "true")
+        self.lbl_part1_summary.setStyleSheet("font-weight: bold;")
         card1_layout.addWidget(self.lbl_part1_summary)
 
         path1_layout = QHBoxLayout()
@@ -169,13 +171,13 @@ class SplitDialog(QDialog):
 
         # 卡片 2：后半部分
         card2 = QFrame()
-        card2.setStyleSheet("background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px;")
+        card2.setProperty("card_accent", "true")
         card2_layout = QVBoxLayout(card2)
         card2_layout.setContentsMargins(12, 10, 12, 10)
         card2_layout.setSpacing(6)
 
         self.lbl_part2_summary = QLabel()
-        self.lbl_part2_summary.setStyleSheet("font-weight: bold; color: #7C3AED;")
+        self.lbl_part2_summary.setStyleSheet("font-weight: bold; color: #8B5CF6;")
         card2_layout.addWidget(self.lbl_part2_summary)
 
         path2_layout = QHBoxLayout()
@@ -365,18 +367,21 @@ class SplitDialog(QDialog):
         if success:
             self.lbl_status.setText("拆分已成功完成！")
             if not is_offscreen:
-                reply = QMessageBox.information(
-                    self,
-                    "拆分成功",
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("拆分成功")
+                msg_box.setText(
                     f"PDF 已成功拆分为两部分：\n\n"
                     f"1. {os.path.basename(path1)} (第 1 ~ {split_point} 页)\n"
                     f"2. {os.path.basename(path2)} (第 {split_point + 1} ~ {self._total_pages} 页)\n\n"
                     f"输出目录：\n{os.path.dirname(os.path.abspath(path1))}\n\n"
-                    f"是否立即在文件管理器中打开所在文件夹？",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
+                    f"是否立即在文件管理器中打开所在文件夹？"
                 )
-                if reply == QMessageBox.Yes:
+                msg_box.setIcon(QMessageBox.Information)
+                btn_open = msg_box.addButton("打开文件夹", QMessageBox.AcceptRole)
+                btn_later = msg_box.addButton("稍后", QMessageBox.RejectRole)
+                msg_box.setDefaultButton(btn_open)
+                msg_box.exec()
+                if msg_box.clickedButton() == btn_open:
                     try:
                         os.startfile(os.path.dirname(os.path.abspath(path1)))
                     except Exception:

@@ -250,6 +250,19 @@ def main() -> int:
     app.setApplicationDisplayName("PDF 编辑器")
     app.setOrganizationName("PdfEditorPro")
 
+    # 全局加载 Qt 官方标准中文语言翻译包（汉化标准对话框、右键菜单、文件选择器等）
+    from PySide6.QtCore import QTranslator, QLibraryInfo
+    from core.utils import ResourceUtils
+    qt_translator = QTranslator(app)
+    qm_path = ResourceUtils.get_asset_path("qtbase_zh_CN.qm")
+    if os.path.isfile(qm_path):
+        qt_translator.load(qm_path)
+        app.installTranslator(qt_translator)
+    else:
+        trans_dir = QLibraryInfo.path(QLibraryInfo.TranslationsPath)
+        if qt_translator.load("qtbase_zh_CN.qm", trans_dir):
+            app.installTranslator(qt_translator)
+
     # 在 Qt 激活全局高分屏上下文后，立即执行居中校准锁定
     recenter_pyi_splash()
 

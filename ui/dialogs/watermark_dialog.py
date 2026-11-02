@@ -48,10 +48,9 @@ class WatermarkDialog(QDialog):
         if parent is not None and hasattr(parent, "styleSheet") and parent.styleSheet():
             self.setStyleSheet(parent.styleSheet())
         else:
-            style_path = ResourceUtils.get_resource_path(os.path.join("assets", "style_light.qss"))
-            if os.path.isfile(style_path):
-                with open(style_path, "r", encoding="utf-8") as f:
-                    self.setStyleSheet(f.read())
+            content = ResourceUtils.load_stylesheet("style_light.qss")
+            if content:
+                self.setStyleSheet(content)
 
     def _init_ui(self) -> None:
         """

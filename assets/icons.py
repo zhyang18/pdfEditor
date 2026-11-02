@@ -32,6 +32,11 @@ class IconLibrary:
             <line x1="12" y1="18" x2="12" y2="12"/>
             <line x1="9" y1="15" x2="15" y2="15"/>
         </svg>""",
+        "print": """<svg viewBox="0 0 24 24" fill="none" stroke="#2563EB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 6 2 18 2 18 9"/>
+            <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+            <rect x="6" y="14" width="12" height="8"/>
+        </svg>""",
         "undo": """<svg viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 7v6h6"/>
             <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>
@@ -98,6 +103,14 @@ class IconLibrary:
         "move_down": """<svg viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"/>
             <polyline points="19 12 12 19 5 12"/>
+        </svg>""",
+        "reorder": """<svg viewBox="0 0 24 24" fill="none" stroke="#2563EB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 7 7 4 10 7"/>
+            <line x1="7" y1="4" x2="7" y2="20"/>
+            <polyline points="4 17 7 20 10 17"/>
+            <line x1="14" y1="6" x2="21" y2="6"/>
+            <line x1="14" y1="12" x2="19" y2="12"/>
+            <line x1="14" y1="18" x2="17" y2="18"/>
         </svg>""",
         "merge": """<svg viewBox="0 0 24 24" fill="none" stroke="#7C3AED" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8z"/>

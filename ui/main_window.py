@@ -4,17 +4,18 @@ PDF 编辑器主窗口模块。
 """
 
 import os
-from typing import Optional
+from typing import Optional, List
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog, QMessageBox,
-    QLabel, QSlider, QHBoxLayout, QWidget, QSpinBox
+    QLabel, QSlider, QHBoxLayout, QWidget, QSpinBox,
+    QProgressDialog, QApplication, QDialog
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, QActionGroup, QResizeEvent
 
 from core.pdf_document import PdfDocument
 from core.history_manager import HistoryManager, Command
-from core.utils import FileUtils, ResourceUtils
+from core.utils import FileUtils, ResourceUtils, PageReorderHelper
 from ui.toolbar import PdfToolBar
 from ui.thumbnail_panel import ThumbnailPanel
 from ui.canvas_view import PdfCanvasView
@@ -62,6 +63,58 @@ class PageMoveCommand(Command):
         success = self._doc.move_page(self._to_idx, self._from_idx)
         if success:
             self._main_window.refresh_views(self._from_idx)
+        return success
+
+
+class PageReorderCommand(Command):
+    """
+    页面批量重排与定向移动可撤销命令。
+    基于置换与逆置换数学映射，支持重排操作与撤销 (Undo) 完美双向还原。
+    """
+
+    def __init__(
+        self,
+        pdf_doc: PdfDocument,
+        new_order: List[int],
+        description: str,
+        main_window: "MainWindow"
+    ) -> None:
+        """
+        初始化页面重排命令。
+
+        @param pdf_doc 目标 PDF 文档对象
+        @param new_order 重排后的 0-based 页面索引列表
+        @param description 命令动作文本说明
+        @param main_window 主窗口实例
+        """
+        super().__init__(description)
+        self._doc = pdf_doc
+        self._new_order = list(new_order)
+        self._inverse_order = PageReorderHelper.calculate_inverse_permutation(new_order)
+        self._main_window = main_window
+
+    def execute(self) -> bool:
+        """
+        执行页面重排。
+
+        @return 是否重排成功
+        """
+        success = self._doc.reorder_pages(self._new_order)
+        if success:
+            self._main_window.refresh_views(0)
+            self._main_window.lbl_status.setText(f"已成功执行：{self.description}")
+        return success
+
+    def undo(self) -> bool:
+        """
+        撤销页面重排，按逆置换无损恢复原始页面排列。
+
+        @return 撤销是否成功
+        """
+        success = self._doc.reorder_pages(self._inverse_order)
+        if success:
+            self._main_window.refresh_views(0)
+            self._main_window.lbl_status.setText(f"已撤销操作：{self.description}")
         return success
 
 
@@ -285,6 +338,7 @@ class MainWindow(QMainWindow):
         self.toolbar.open_requested.connect(self._on_open_file)
         self.toolbar.save_requested.connect(self._on_save_file)
         self.toolbar.save_as_requested.connect(self._on_save_as_file)
+        self.toolbar.print_requested.connect(self._on_print_document)
         self.toolbar.undo_requested.connect(self._on_undo)
         self.toolbar.redo_requested.connect(self._on_redo)
         self.toolbar.reorder_dialog_requested.connect(self._on_open_reorder_dialog)
@@ -334,6 +388,7 @@ class MainWindow(QMainWindow):
         self.thumbnail_panel.page_inserted.connect(self._on_thumbnail_insert)
         self.thumbnail_panel.page_extracted.connect(self._on_thumbnail_extract)
         self.thumbnail_panel.split_requested.connect(self._on_split_pdf_at_page)
+        self.thumbnail_panel.reorder_requested.connect(self._on_open_reorder_dialog)
 
         # 4. 底部状态栏
         self.status_bar = self.statusBar()
@@ -362,6 +417,10 @@ class MainWindow(QMainWindow):
         act_save_as = menu_file.addAction(IconLibrary.get_icon("save_as", 16), "另存为...(&A)")
         act_save_as.setShortcut("Ctrl+Shift+S")
         act_save_as.triggered.connect(self._on_save_as_file)
+
+        act_print = menu_file.addAction(IconLibrary.get_icon("print", 16), "打印...(&P)")
+        act_print.setShortcut("Ctrl+P")
+        act_print.triggered.connect(self._on_print_document)
 
         menu_file.addSeparator()
         act_exit = menu_file.addAction("退出(&X)")
@@ -396,7 +455,7 @@ class MainWindow(QMainWindow):
         act_split_page.triggered.connect(self._on_split_pdf)
 
         menu_page.addSeparator()
-        act_reorder = menu_page.addAction(IconLibrary.get_icon("move_up", 16), "批量重排页面顺序...(&R)")
+        act_reorder = menu_page.addAction(IconLibrary.get_icon("reorder", 16), "批量重排页面顺序...(&R)")
         act_reorder.triggered.connect(self._on_open_reorder_dialog)
 
         act_rot_r = menu_page.addAction(IconLibrary.get_icon("rotate_right", 16), "顺时针旋转 90°")
@@ -433,6 +492,10 @@ class MainWindow(QMainWindow):
 
         act_watermark = menu_tools.addAction(IconLibrary.get_icon("watermark", 16), "添加文本水印...")
         act_watermark.triggered.connect(self._on_add_watermark)
+
+        menu_tools.addSeparator()
+        act_print_tool = menu_tools.addAction(IconLibrary.get_icon("print", 16), "打印当前文档...(&P)")
+        act_print_tool.triggered.connect(self._on_print_document)
 
         # 5. 视图菜单
         menu_view = menubar.addMenu("视图(&V)")
@@ -519,6 +582,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence.Open, self, self._on_open_file)
         QShortcut(QKeySequence.Save, self, self._on_save_file)
         QShortcut(QKeySequence.SaveAs, self, self._on_save_as_file)
+        QShortcut(QKeySequence.Print, self, self._on_print_document)
         QShortcut(QKeySequence.Undo, self, self._on_undo)
         QShortcut(QKeySequence.Redo, self, self._on_redo)
         QShortcut(QKeySequence.ZoomIn, self, self._on_zoom_in)
@@ -721,24 +785,32 @@ class MainWindow(QMainWindow):
         cmd = PageMoveCommand(self._doc, from_idx, to_idx, self)
         self._history.push(cmd)
 
-    def _on_open_reorder_dialog(self) -> None:
+    def _on_open_reorder_dialog(self, initial_source_page: Optional[int] = None) -> None:
         """
-        弹出批量页码重排输入对话框（按需懒加载）。
+        弹出批量页码重排与定向移动输入对话框（按需懒加载）。
+        通过 PageReorderCommand 将重排操作纳入撤销/重做历史栈。
+
+        @param initial_source_page 初始预设的源页面 0-based 索引（可选，默认为空）
         """
         if not self._doc.is_open or self._doc.page_count < 2:
             QMessageBox.information(self, "提示", "当前文档页面不足 2 页，无需重排。")
             return
 
+        # 过滤 QAction.triggered 信号默认传递的 checked: bool 参数
+        if isinstance(initial_source_page, bool):
+            initial_source_page = None
+
         from ui.dialogs.reorder_dialog import ReorderDialog
-        dlg = ReorderDialog(self._doc.page_count, self)
+        dlg = ReorderDialog(
+            page_count=self._doc.page_count,
+            initial_source_page=initial_source_page,
+            parent=self
+        )
         if dlg.exec():
             new_order = dlg.new_order
-            success = self._doc.reorder_pages(new_order)
-            if success:
-                self.refresh_views(0)
-                self.lbl_status.setText("已按新顺序完成页面重排！")
-            else:
-                QMessageBox.critical(self, "错误", "页面重排执行失败。")
+            desc = dlg.operation_description or "批量重排页面顺序"
+            cmd = PageReorderCommand(self._doc, new_order, desc, self)
+            self._history.push(cmd)
 
     def _on_rotate_page(self, angle: int) -> None:
         """
@@ -803,13 +875,15 @@ class MainWindow(QMainWindow):
             return
 
         curr = self.canvas_view.current_page_index
-        reply = QMessageBox.question(
-            self,
-            "确认删除",
-            f"确定要删除当前第 {curr + 1} 页吗？此操作不可逆。",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("确认删除")
+        msg_box.setText(f"确定要删除当前第 {curr + 1} 页吗？此操作不可逆。")
+        msg_box.setIcon(QMessageBox.Question)
+        btn_confirm = msg_box.addButton("确定删除", QMessageBox.AcceptRole)
+        btn_cancel = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(btn_cancel)
+        msg_box.exec()
+        if msg_box.clickedButton() == btn_confirm:
             success = self._doc.delete_page(curr)
             if success:
                 new_idx = max(0, curr - 1)
@@ -1028,6 +1102,73 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self.lbl_status.setText(f"已在第 {split_after_page} 页之后拆分 PDF！")
 
+    def _on_print_document(self) -> None:
+        """
+        触发 PDF 文档打印向导流程。
+        校验当前文档打开状态，展示打印配置对话框，并在确认后启动高保真光栅化打印调度与进度反馈。
+        """
+        if not self._doc.is_open or self._doc.page_count == 0:
+            QMessageBox.information(self, "提示", "请先打开需要打印的 PDF 文档。")
+            return
+
+        from ui.dialogs.print_dialog import PrintDialog
+        from core.pdf_printer import PdfPrinter
+
+        current_page = self.canvas_view.current_page_index
+        dialog = PrintDialog(self._doc, current_page_index=current_page, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        config = dialog.get_print_configuration()
+        if config is None or not config.page_indices:
+            return
+
+        total_pages = len(config.page_indices)
+        progress = QProgressDialog("正在准备打印任务...", "取消", 0, total_pages, self)
+        progress.setWindowTitle("正在打印")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(200)
+        progress.setValue(0)
+
+        is_canceled = False
+
+        def progress_callback(current_idx: int, total: int) -> bool:
+            """
+            打印进度更新与中断检测回调函数。
+
+            @param current_idx 当前正在光栅化发送的页码序号（从 1 开始）
+            @param total 待打印的总页数
+            @return 若用户请求取消返回 False，否则返回 True 继续打印
+            """
+            nonlocal is_canceled
+            if progress.wasCanceled():
+                is_canceled = True
+                return False
+            progress.setValue(current_idx)
+            progress.setLabelText(f"正在发送第 {current_idx} / {total} 页到打印机...")
+            QApplication.processEvents()
+            return True
+
+        self.lbl_status.setText(f"正在向打印机 '{config.printer_name}' 发送任务...")
+        QApplication.processEvents()
+
+        success, message = PdfPrinter.print_document(
+            self._doc,
+            config,
+            progress_callback=progress_callback
+        )
+        progress.close()
+
+        if success:
+            self.lbl_status.setText(f"打印成功：{message}")
+            QMessageBox.information(self, "打印完成", message)
+        else:
+            if is_canceled:
+                self.lbl_status.setText("用户取消了打印任务")
+            else:
+                self.lbl_status.setText(f"打印失败：{message}")
+                QMessageBox.critical(self, "打印失败", message)
+
     def _on_export_to_word(self) -> None:
         """
         将当前 PDF 高保真转换为 Word (.docx) 文件。
@@ -1179,15 +1320,16 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         """
-        从本地 QSS 样式表文件加载并注入主窗口全局样式。
-        基于 ResourceUtils 自包含寻址，自动适配单文件 EXE 临时解压区。
+        从本地 QSS 样式表文件加载并注入应用程序全局及主窗口样式。
+        基于 ResourceUtils 自包含寻址与动态资源路径映射，自动适配单文件 EXE 临时解压区。
         """
         style_file = "style_dark.qss" if self._is_dark_theme else "style_light.qss"
-        style_path = ResourceUtils.get_resource_path(os.path.join("assets", style_file))
-
-        if os.path.isfile(style_path):
-            with open(style_path, "r", encoding="utf-8") as f:
-                self.setStyleSheet(f.read())
+        content = ResourceUtils.load_stylesheet(style_file)
+        if content:
+            app = QApplication.instance()
+            if app is not None:
+                app.setStyleSheet(content)
+            self.setStyleSheet(content)
 
     def _maybe_save_changes(self) -> bool:
         """
@@ -1198,16 +1340,21 @@ class MainWindow(QMainWindow):
         if not self._doc.is_open or not self._doc.is_modified:
             return True
 
-        reply = QMessageBox.question(
-            self,
-            "保存修改",
-            "当前文档有未保存的修改，是否立即保存？",
-            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
-        )
-        if reply == QMessageBox.Save:
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("保存修改")
+        msg_box.setText("当前文档有未保存的修改，是否立即保存？")
+        msg_box.setIcon(QMessageBox.Question)
+        btn_save = msg_box.addButton("保存", QMessageBox.AcceptRole)
+        btn_discard = msg_box.addButton("不保存", QMessageBox.DestructiveRole)
+        btn_cancel = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(btn_save)
+
+        msg_box.exec()
+        clicked = msg_box.clickedButton()
+        if clicked == btn_save:
             self._on_save_file()
             return True
-        elif reply == QMessageBox.Discard:
+        elif clicked == btn_discard:
             return True
         else:
             return False

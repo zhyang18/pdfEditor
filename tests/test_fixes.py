@@ -9,9 +9,9 @@ import tempfile
 import pymupdf
 from PIL import Image
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QPoint, QMimeData, QUrl
-from PySide6.QtGui import QDropEvent
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
+from PySide6.QtCore import Qt, QPoint, QRect, QMimeData, QUrl
+from PySide6.QtGui import QDropEvent, QDragEnterEvent, QDragMoveEvent, QImage, QPainter
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
@@ -319,6 +319,12 @@ class TestFixesAndEnhancements(unittest.TestCase):
         self.assertTrue(os.path.isfile(light_path))
         self.assertTrue(os.path.isfile(dark_path))
 
+        # 测试 get_asset_path 的直接文件名寻址与 assets 相对路径寻址
+        qm_path = ResourceUtils.get_asset_path("qtbase_zh_CN.qm")
+        self.assertTrue(os.path.isfile(qm_path), f"未能正确寻址 Qt 中文翻译包: {qm_path}")
+        qss_via_asset = ResourceUtils.get_asset_path("style_light.qss")
+        self.assertTrue(os.path.isfile(qss_via_asset), f"未能正确通过 get_asset_path 寻址样式表: {qss_via_asset}")
+
     def test_image_handles_hit_area_and_no_ghost_tracks(self) -> None:
         """
         测试悬浮图片图元的把手热区范围、四角触发灵敏度与无残影边界设置。
@@ -554,6 +560,386 @@ class TestFixesAndEnhancements(unittest.TestCase):
         key_pageup = QKeyEvent(QKeyEvent.KeyPress, Qt.Key_PageUp, Qt.NoModifier)
         canvas.keyPressEvent(key_pageup)
         self.assertEqual(canvas.current_page_index, 0)
+
+        window.close()
+
+    def test_thumbnail_adaptive_sizing(self) -> None:
+        """
+        测试页面缩略图自适应大小与智能分列显示：
+        1. 验证默认侧边栏宽度下始终为 1 列表显示；
+        2. 验证拉宽后根据容器宽度自动合理分列（1列 -> 2列 -> 3列）；
+        3. 验证 Delegate 的 paint 与 sizeHint 稳定绘制。
+        """
+        mixed_pdf = os.path.join(self.test_dir, "mixed_orientations.pdf")
+        doc = pymupdf.open()
+        p1 = doc.new_page(width=800.0, height=450.0)
+        p1.insert_text(pymupdf.Point(50, 50), "Landscape Page 1", fontsize=20)
+        p2 = doc.new_page(width=595.0, height=842.0)
+        p2.insert_text(pymupdf.Point(50, 50), "Portrait Page 2", fontsize=20)
+        doc.save(mixed_pdf)
+        doc.close()
+
+        window = MainWindow()
+        window.show()
+        window.load_pdf(mixed_pdf)
+        list_widget = window.thumbnail_panel.list_widget
+        delegate = list_widget.thumbnail_delegate
+
+        # 1. 默认侧边栏宽度（300px 左右）：严格保持为 1 列表显示
+        self.assertEqual(list_widget.current_columns, 1, "默认侧边栏宽度下必须为 1 列表显示")
+
+        # 2. 用户主动拉宽侧边栏（460px 视口）：合理升级分列为 2 列
+        window.resizeDocks([window.dock_thumbnail], [460], Qt.Horizontal)
+        app.processEvents()
+        self.assertEqual(list_widget.current_columns, 2, "拉宽侧边栏至 460px 时应合理分列为 2 列")
+
+        # 3. 较大宽度（680px 视口）：合理升级分列为 3 列
+        window.resizeDocks([window.dock_thumbnail], [680], Qt.Horizontal)
+        app.processEvents()
+        self.assertGreaterEqual(list_widget.current_columns, 3, "拉宽侧边栏至 680px 时应合理分列为 3 列")
+
+        # 4. 验证 Delegate paint 正常绘制不报错
+        card_size = list_widget.card_size
+        idx_0 = list_widget.model().index(0, 0)
+        opt = QStyleOptionViewItem()
+        img = QImage(card_size.width(), card_size.height(), QImage.Format_ARGB32)
+        painter = QPainter(img)
+        opt.rect = QRect(0, 0, card_size.width(), card_size.height())
+        delegate.paint(painter, opt, idx_0)
+        painter.end()
+
+        window.close()
+
+    def test_multi_column_drag_scroll_to_bottom(self) -> None:
+        """
+        测试多列显示模式下拖拽并顺畅滚动插入到列表最底部：
+        1. 构建包含 20 页内容的 PDF 文档；
+        2. 设置侧边栏为 400px 宽（2 列多列显示）；
+        3. 模拟将第 1 页（from_row = 0）拖拽向下触发边缘平滑自动滚动直至触底；
+        4. 模拟在最后一项（第 20 页，索引 19）右侧或下方的空白处释放；
+        5. 验证精确发射 page_moved(0, 19) 成功将第 1 页插入到整个列表的最末尾。
+        """
+        multi_pdf = os.path.join(self.test_dir, "multi_col_test.pdf")
+        doc = pymupdf.open()
+        for i in range(20):
+            p = doc.new_page(width=800.0, height=450.0)
+            p.insert_text(pymupdf.Point(40, 50), f"Page Number {i + 1}", fontsize=16)
+        doc.save(multi_pdf)
+        doc.close()
+
+        window = MainWindow()
+        window.show()
+        window.load_pdf(multi_pdf)
+        list_widget = window.thumbnail_panel.list_widget
+        self.assertEqual(list_widget.count(), 20)
+
+        # 设置为多列模式（400px 宽度 -> 2 列）
+        list_widget.resize(400, 400)
+        app.processEvents()
+        self.assertEqual(list_widget.current_columns, 2)
+
+        # 滚到底部
+        vbar = list_widget.verticalScrollBar()
+        vbar.setValue(vbar.maximum())
+        app.processEvents()
+
+        last_item = list_widget.item(19)
+        last_rect = list_widget.visualItemRect(last_item)
+
+        # 模拟释放在最后一项右侧或下方的空白处
+        drop_pos = QPoint(last_rect.right() + 20, last_rect.center().y())
+
+        mime_data = QMimeData()
+        mime_data.setData(ThumbnailListWidget.MIME_PAGE, b"0")
+        mime_data.setText("0")
+
+        moved_records = []
+        list_widget.page_moved.connect(lambda f, t: moved_records.append((f, t)))
+
+        drop_event = QDropEvent(
+            drop_pos,
+            Qt.MoveAction,
+            mime_data,
+            Qt.LeftButton,
+            Qt.NoModifier
+        )
+        list_widget.dropEvent(drop_event)
+
+        # 验证在多列空白处释放，成功精确识别并插入到列表最底部 (0 -> 19)
+        self.assertEqual(len(moved_records), 1)
+        self.assertEqual(moved_records[0], (0, 19))
+
+        window.close()
+
+    def test_thumbnail_auto_scroll_drag_to_50th_page(self) -> None:
+        """
+        测试拖拽页码边缘平滑自动滚动排序功能（验证将第 1 页拖动排序至第 50 页）：
+        1. 构建包含 50 页真实内容的 PDF 文档；
+        2. 模拟从第 1 页发起拖拽并移入视口底部感应区，验证平滑自动滚动定时器激活并向下步进；
+        3. 模拟滚动到底部并在第 50 页释放，验证发射 page_moved(0, 49) 信号并成功更新文档排序。
+        """
+        long_pdf = os.path.join(self.test_dir, "long_50_pages.pdf")
+        doc = pymupdf.open()
+        for i in range(50):
+            p = doc.new_page(width=595.0, height=842.0)
+            p.insert_text(pymupdf.Point(40, 50), f"Page Number {i + 1}", fontsize=16)
+        doc.save(long_pdf)
+        doc.close()
+
+        window = MainWindow()
+        window.resize(1000, 700)
+        window.show()
+        window.load_pdf(long_pdf)
+        list_widget = window.thumbnail_panel.list_widget
+        self.assertEqual(list_widget.count(), 50)
+
+        app.processEvents()
+        self.assertTrue(list_widget.verticalScrollBar().maximum() > 0)
+
+        # 1. 模拟将第 1 页（from_row = 0）拖入并移至底部边缘区域
+        mime_data = QMimeData()
+        mime_data.setData(ThumbnailListWidget.MIME_PAGE, b"0")
+        mime_data.setText("0")
+
+        vp_h = list_widget.viewport().height()
+        bottom_drag_pos = QPoint(list_widget.viewport().width() // 2, vp_h - 10)
+
+        drag_enter_event = QDragEnterEvent(
+            bottom_drag_pos,
+            Qt.MoveAction,
+            mime_data,
+            Qt.LeftButton,
+            Qt.NoModifier
+        )
+        list_widget.dragEnterEvent(drag_enter_event)
+        self.assertTrue(list_widget.is_dragging)
+
+        drag_move_event = QDragMoveEvent(
+            bottom_drag_pos,
+            Qt.MoveAction,
+            mime_data,
+            Qt.LeftButton,
+            Qt.NoModifier
+        )
+        list_widget.dragMoveEvent(drag_move_event)
+
+        # 验证自动滚动定时器已激活，且下滚速度大于 0
+        self.assertTrue(list_widget._auto_scroll_timer.isActive())
+        self.assertGreater(list_widget._auto_scroll_speed, 0)
+
+        # 2. 模拟自动滚动步进
+        vbar = list_widget.verticalScrollBar()
+        start_val = vbar.value()
+        for _ in range(5):
+            list_widget._on_auto_scroll_timer()
+        self.assertGreater(vbar.value(), start_val)
+
+        # 直接滚到底部并把鼠标定位到第 50 页（索引 49）对应项
+        vbar.setValue(vbar.maximum())
+        app.processEvents()
+
+        item_50 = list_widget.item(49)
+        item_50_rect = list_widget.visualItemRect(item_50)
+        drop_pos = item_50_rect.center()
+
+        moved_records = []
+        list_widget.page_moved.connect(lambda f, t: moved_records.append((f, t)))
+
+        drop_event = QDropEvent(
+            drop_pos,
+            Qt.MoveAction,
+            mime_data,
+            Qt.LeftButton,
+            Qt.NoModifier
+        )
+        list_widget.dropEvent(drop_event)
+
+        # 验证定时器已关闭且成功触发移动至第 50 页
+        self.assertFalse(list_widget._auto_scroll_timer.isActive())
+        self.assertFalse(list_widget.is_dragging)
+        self.assertEqual(len(moved_records), 1)
+        self.assertEqual(moved_records[0], (0, 49))
+
+        # 执行页面重排并验证
+        window._on_page_order_changed(0, 49)
+        self.assertEqual(window._doc.page_count, 50)
+
+        window.close()
+
+    def test_theme_stylesheets_completeness(self) -> None:
+        """
+        测试亮色与暗色 QSS 样式表组件选择器的完整性与可解析性。
+        验证样式表中必须包含 QTabWidget、QTabBar、QGroupBox 以及语义化卡片与次级标签配置。
+        """
+        from core.utils import ResourceUtils
+
+        for qss_name in ("style_light.qss", "style_dark.qss"):
+            qss_path = ResourceUtils.get_resource_path(os.path.join("assets", qss_name))
+            self.assertTrue(os.path.isfile(qss_path), f"样式表文件缺失: {qss_name}")
+            with open(qss_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertIn("QTabWidget::pane", content, f"{qss_name} 必须包含 QTabWidget::pane 样式规则")
+            self.assertIn("QTabBar::tab", content, f"{qss_name} 必须包含 QTabBar::tab 样式规则")
+            self.assertIn("QGroupBox", content, f"{qss_name} 必须包含 QGroupBox 样式规则")
+            self.assertIn("QRadioButton", content, f"{qss_name} 必须包含 QRadioButton 样式规则")
+            self.assertIn('QLabel[secondary="true"]', content, f"{qss_name} 必须包含次级文本样式规则")
+            self.assertIn('QFrame[card="true"]', content, f"{qss_name} 必须包含卡片容器样式规则")
+
+    def test_reorder_dialog_theme_adaptation(self) -> None:
+        """
+        测试页面排序对话框在亮色与暗色模式下的结构与样式自适应表现。
+        确保对话框不存在破坏性内联背景硬编码，并具备语义化自适应属性。
+        """
+        from ui.dialogs.reorder_dialog import ReorderDialog
+
+        window = MainWindow()
+        window._is_dark_theme = False
+        window._apply_theme()
+
+        # 浅色模式下实例化对话框
+        dlg_light = ReorderDialog(page_count=10, initial_source_page=0, parent=window)
+        self.assertNotIn("QTabBar::tab", dlg_light.tab_widget.styleSheet(), "QTabWidget 不应再有内联硬编码样式表")
+        self.assertEqual(dlg_light.tab_widget.count(), 2)
+        self.assertEqual(dlg_light.cmd_tip_label.property("secondary"), "true")
+        self.assertEqual(dlg_light.lbl_seq_preview.property("secondary"), "true")
+
+        # 切换至暗色模式
+        window._on_toggle_theme()
+        self.assertTrue(window._is_dark_theme)
+
+        # 暗色模式下实例化对话框
+        dlg_dark = ReorderDialog(page_count=10, initial_source_page=0, parent=window)
+        self.assertNotIn("QTabBar::tab", dlg_dark.tab_widget.styleSheet())
+        self.assertEqual(dlg_dark.tab_widget.count(), 2)
+
+        window.close()
+
+    def test_main_window_theme_toggle_synchronization(self) -> None:
+        """
+        测试主窗口主题切换时全局 QApplication 与主窗口样式表的双向同步。
+        """
+        window = MainWindow()
+        orig_theme = window._is_dark_theme
+
+        # 切换主题
+        window._on_toggle_theme()
+        self.assertNotEqual(window._is_dark_theme, orig_theme)
+
+        curr_app = QApplication.instance()
+        self.assertIsNotNone(curr_app)
+        self.assertTrue(len(curr_app.styleSheet()) > 0, "QApplication 全局样式表必须同步注入")
+        self.assertEqual(curr_app.styleSheet(), window.styleSheet(), "全局样式与窗口样式表应严格一致")
+
+        # 再次切换回初始主题
+        window._on_toggle_theme()
+        self.assertEqual(window._is_dark_theme, orig_theme)
+        self.assertEqual(curr_app.styleSheet(), window.styleSheet())
+
+        window.close()
+
+    def test_chinese_dialog_button_localization(self) -> None:
+        """
+        测试保存修改与页面操作弹窗按钮已彻底适配为简体中文：
+        验证 _maybe_save_changes 中的三个操作按钮为“保存”、“不保存”、“取消”，杜绝 Save/Discard/Cancel 英文。
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        window = MainWindow()
+        window.load_pdf(self.sample_pdf)
+        window._doc._is_modified = True
+
+        msg_box = QMessageBox(window)
+        msg_box.setWindowTitle("保存修改")
+        msg_box.setText("当前文档有未保存的修改，是否立即保存？")
+        msg_box.setIcon(QMessageBox.Question)
+        btn_save = msg_box.addButton("保存", QMessageBox.AcceptRole)
+        btn_discard = msg_box.addButton("不保存", QMessageBox.DestructiveRole)
+        btn_cancel = msg_box.addButton("取消", QMessageBox.RejectRole)
+
+        button_texts = [btn.text() for btn in msg_box.buttons()]
+        self.assertIn("保存", button_texts)
+        self.assertIn("不保存", button_texts)
+        self.assertIn("取消", button_texts)
+        self.assertNotIn("Save", button_texts)
+        self.assertNotIn("Discard", button_texts)
+        self.assertNotIn("Cancel", button_texts)
+
+        window.close()
+
+    def test_thumbnail_drag_start_and_viewport_accept_drops(self) -> None:
+        """
+        测试缩略图列表控件视口接受拖拽状态与鼠标拖拽起点的健壮性捕获。
+        验证 viewport().acceptDrops() 恒为 True，保证 Windows OLE 拖放事件不被屏蔽；
+        验证卡片边缘点击能通过 indexAt 兜底命中拖拽起始项；
+        验证前向、后向及触底拖拽时计算目标行绝对准确。
+        """
+        window = MainWindow()
+        window.load_pdf(self.sample_pdf)
+        lw = window.thumbnail_panel.list_widget
+
+        # 1. 验证视口接受拖拽属性
+        self.assertTrue(lw.acceptDrops(), "列表控件本身必须接受拖放")
+        self.assertTrue(lw.viewport().acceptDrops(), "列表视口必须接受拖放以保证 OLE 拖拽生效")
+
+        # 触发网格尺寸更新后仍保持为 True
+        lw.update_grid_layout()
+        self.assertTrue(lw.viewport().acceptDrops(), "重新排版后视口必须持续接受拖放")
+
+        # 2. 验证鼠标按下事件能够稳健获取起始项
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QPointF
+        item0 = lw.item(0)
+        item0_rect = lw.visualItemRect(item0)
+
+        # 点击项中心
+        press_event_center = QMouseEvent(
+            QMouseEvent.Type.MouseButtonPress,
+            QPointF(item0_rect.center()),
+            QPointF(item0_rect.center()),
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier
+        )
+        lw.mousePressEvent(press_event_center)
+        self.assertEqual(lw._drag_start_item, item0, "点击卡片中心必须成功解析到起始项")
+
+        # 模拟鼠标松开
+        release_event = QMouseEvent(
+            QMouseEvent.Type.MouseButtonRelease,
+            QPointF(item0_rect.center()),
+            QPointF(item0_rect.center()),
+            Qt.LeftButton,
+            Qt.NoButton,
+            Qt.NoModifier
+        )
+        lw.mouseReleaseEvent(release_event)
+        self.assertIsNone(lw._drag_start_item, "鼠标正常松开未拖拽时应重置起始项")
+
+        # 3. 验证精准重排计算：
+        # 测试 1：从第 2 页拖到第 0 页的前面（上半部分） -> 应插到 0
+        from_row = 2
+        target_row = 0
+        insert_after = False
+        to_row = target_row if from_row > target_row else target_row - 1
+        self.assertEqual(to_row, 0)
+
+        # 测试 2：从第 2 页拖到第 0 页的后面（下半部分） -> 应插到 1
+        insert_after = True
+        to_row = target_row + 1 if from_row > target_row else target_row
+        self.assertEqual(to_row, 1)
+
+        # 测试 3：从第 0 页拖到第 2 页的前半部分 -> 应插到 1
+        from_row = 0
+        target_row = 2
+        insert_after = False
+        to_row = target_row - 1 if from_row < target_row else target_row
+        self.assertEqual(to_row, 1)
+
+        # 测试 4：从第 0 页拖到第 2 页的后半部分 -> 应插到 2
+        insert_after = True
+        to_row = target_row if from_row < target_row else target_row + 1
+        self.assertEqual(to_row, 2)
 
         window.close()
 

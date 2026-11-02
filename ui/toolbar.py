@@ -27,6 +27,7 @@ class PdfToolBar(QToolBar):
     open_requested = Signal()
     save_requested = Signal()
     save_as_requested = Signal()
+    print_requested = Signal()
 
     undo_requested = Signal()
     redo_requested = Signal()
@@ -88,6 +89,10 @@ class PdfToolBar(QToolBar):
         self.act_save_as.setToolTip("另存为新文件 (Ctrl+Shift+S)")
         self.act_save_as.triggered.connect(self.save_as_requested.emit)
 
+        self.act_print = self.addAction(IconLibrary.get_icon("print", 20), "打印")
+        self.act_print.setToolTip("打印当前文档 (Ctrl+P)")
+        self.act_print.triggered.connect(self.print_requested.emit)
+
         self.addSeparator()
 
         # 2. 撤销/重做
@@ -104,7 +109,7 @@ class PdfToolBar(QToolBar):
         self.addSeparator()
 
         # 3. 页面编排与旋转
-        self.act_reorder = self.addAction(IconLibrary.get_icon("move_up", 18), "重排顺序")
+        self.act_reorder = self.addAction(IconLibrary.get_icon("reorder", 18), "重排顺序")
         self.act_reorder.setToolTip("批量输入并重排页面顺序")
         self.act_reorder.triggered.connect(self.reorder_dialog_requested.emit)
 
@@ -196,6 +201,7 @@ class PdfToolBar(QToolBar):
             self.act_open: ("打开", "打开", True),
             self.act_save: ("保存", "保存", True),
             self.act_save_as: ("另存为", "另存", True),
+            self.act_print: ("打印", "打印", True),
             self.act_undo: ("撤销", "撤销", True),
             self.act_redo: ("重做", "重做", True),
             self.act_reorder: ("重排顺序", "重排", False),
