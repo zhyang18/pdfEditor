@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import json
+import threading
 from typing import Optional, List, Tuple
 import pymupdf
 from PySide6.QtGui import QImage
@@ -22,23 +23,20 @@ class PdfDocument:
     def __init__(self) -> None:
         """
         初始化 PDF 文档实例。
-        创建空状态的文档对象，记录文件路径与修改标记，初始化图片图层管理器。
+        创建空状态的文档对象，记录文件路径与修改标记，初始化图片图层管理器与线程同步互斥锁。
         """
         self._doc: Optional[pymupdf.Document] = None
         self._base_doc_bytes: Optional[bytes] = None
         self._file_path: Optional[str] = None
         self._is_modified: bool = False
+        self._lock: threading.RLock = threading.RLock()
         self.image_layers: ImageLayerManager = ImageLayerManager()
 
     def _sync_base_doc_bytes(self) -> None:
         """
-        同步底层纯净 PDF 文档的内存字节快照。
+        同步底层纯净 PDF 文档的内存字节快照（已优化为惰性按需执行，避免在编辑热路径中全量序列化）。
         """
-        if self._doc is not None and not self._doc.is_closed:
-            try:
-                self._base_doc_bytes = self._doc.tobytes(garbage=3, deflate=True)
-            except Exception:
-                pass
+        pass
 
     @property
     def file_path(self) -> Optional[str]:
@@ -124,7 +122,6 @@ class PdfDocument:
             except Exception:
                 pass
 
-            self._sync_base_doc_bytes()
             return True
         except Exception:
             self._doc = None
@@ -142,7 +139,6 @@ class PdfDocument:
         self._file_path = None
         self._is_modified = True
         self.image_layers.clear()
-        self._sync_base_doc_bytes()
 
     def get_page_size(self, page_index: int) -> Optional[Tuple[float, float]]:
         """
@@ -151,10 +147,11 @@ class PdfDocument:
         @param page_index 页面索引（从 0 开始）
         @return 包含 (width, height) 的浮点元组；若索引无效则返回 None
         """
-        if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
-            return None
-        rect = self._doc[page_index].rect
-        return (rect.width, rect.height)
+        with self._lock:
+            if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
+                return None
+            rect = self._doc[page_index].rect
+            return (rect.width, rect.height)
 
     def render_page_pixmap(self, page_index: int, dpi: int = 150) -> Optional[QImage]:
         """
@@ -164,27 +161,28 @@ class PdfDocument:
         @param dpi 渲染分辨率（点/英寸），默认为 150 DPI
         @return 渲染生成的 QImage 对象；若失败或页面越界返回 None
         """
-        if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
-            return None
+        with self._lock:
+            if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
+                return None
 
-        try:
-            page = self._doc[page_index]
-            zoom = dpi / 72.0
-            matrix = pymupdf.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            try:
+                page = self._doc[page_index]
+                zoom = dpi / 72.0
+                matrix = pymupdf.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
 
-            # 将 pymupdf.Pixmap 转换为 PySide6.QtGui.QImage
-            image = QImage(
-                pix.samples,
-                pix.width,
-                pix.height,
-                pix.stride,
-                QImage.Format_RGB888
-            )
-            # 必须 copy 一份独立内存，避免 pix 被垃圾回收后野指针崩溃
-            return image.copy()
-        except Exception:
-            return None
+                # 将 pymupdf.Pixmap 转换为 PySide6.QtGui.QImage
+                image = QImage(
+                    pix.samples,
+                    pix.width,
+                    pix.height,
+                    pix.stride,
+                    QImage.Format_RGB888
+                )
+                # 必须 copy 一份独立内存，避免 pix 被垃圾回收后野指针崩溃
+                return image.copy()
+            except Exception:
+                return None
 
     def move_page(self, from_index: int, to_index: int) -> bool:
         """
@@ -195,24 +193,24 @@ class PdfDocument:
         @param to_index 目标页面索引（从 0 开始）
         @return 页面移动是否成功
         """
-        if not self.is_open or self._doc is None:
-            return False
-        total = len(self._doc)
-        if not (0 <= from_index < total and 0 <= to_index < total):
-            return False
-        if from_index == to_index:
-            return True
+        with self._lock:
+            if not self.is_open or self._doc is None:
+                return False
+            total = len(self._doc)
+            if not (0 <= from_index < total and 0 <= to_index < total):
+                return False
+            if from_index == to_index:
+                return True
 
-        try:
-            order = list(range(total))
-            item = order.pop(from_index)
-            order.insert(to_index, item)
-            self._doc.select(order)
-            self._is_modified = True
-            self._sync_base_doc_bytes()
-            return True
-        except Exception:
-            return False
+            try:
+                order = list(range(total))
+                item = order.pop(from_index)
+                order.insert(to_index, item)
+                self._doc.select(order)
+                self._is_modified = True
+                return True
+            except Exception:
+                return False
 
     def reorder_pages(self, new_order: List[int]) -> bool:
         """
@@ -221,18 +219,18 @@ class PdfDocument:
         @param new_order 新的页面索引列表，其元素必须包含所有当前页面的 0-based 索引
         @return 重排是否成功
         """
-        if not self.is_open or self._doc is None:
-            return False
-        if sorted(new_order) != list(range(len(self._doc))):
-            return False
+        with self._lock:
+            if not self.is_open or self._doc is None:
+                return False
+            if sorted(new_order) != list(range(len(self._doc))):
+                return False
 
-        try:
-            self._doc.select(new_order)
-            self._is_modified = True
-            self._sync_base_doc_bytes()
-            return True
-        except Exception:
-            return False
+            try:
+                self._doc.select(new_order)
+                self._is_modified = True
+                return True
+            except Exception:
+                return False
 
     def rotate_page(self, page_index: int, angle: int) -> bool:
         """
@@ -242,19 +240,19 @@ class PdfDocument:
         @param angle 旋转度数，通常为 90、180 或 270 度
         @return 旋转操作是否成功
         """
-        if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
-            return False
+        with self._lock:
+            if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
+                return False
 
-        try:
-            page = self._doc[page_index]
-            current_rot = page.rotation
-            new_rot = (current_rot + angle) % 360
-            page.set_rotation(new_rot)
-            self._is_modified = True
-            self._sync_base_doc_bytes()
-            return True
-        except Exception:
-            return False
+            try:
+                page = self._doc[page_index]
+                current_rot = page.rotation
+                new_rot = (current_rot + angle) % 360
+                page.set_rotation(new_rot)
+                self._is_modified = True
+                return True
+            except Exception:
+                return False
 
     def delete_page(self, page_index: int) -> bool:
         """
@@ -263,18 +261,18 @@ class PdfDocument:
         @param page_index 待删除的页面索引（从 0 开始）
         @return 删除是否成功（若文档仅剩 1 页则禁止删除返回 False）
         """
-        if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
-            return False
-        if len(self._doc) <= 1:
-            return False
+        with self._lock:
+            if not self.is_open or self._doc is None or not (0 <= page_index < len(self._doc)):
+                return False
+            if len(self._doc) <= 1:
+                return False
 
-        try:
-            self._doc.delete_page(page_index)
-            self._is_modified = True
-            self._sync_base_doc_bytes()
-            return True
-        except Exception:
-            return False
+            try:
+                self._doc.delete_page(page_index)
+                self._is_modified = True
+                return True
+            except Exception:
+                return False
 
     def delete_pages(self, page_indices: List[int]) -> bool:
         """
@@ -283,22 +281,22 @@ class PdfDocument:
         @param page_indices 待删除的页面索引列表
         @return 删除是否成功（必须至少保留 1 页）
         """
-        if not self.is_open or self._doc is None or not page_indices:
-            return False
+        with self._lock:
+            if not self.is_open or self._doc is None or not page_indices:
+                return False
 
-        total = len(self._doc)
-        valid_indices = sorted(list(set(idx for idx in page_indices if 0 <= idx < total)), reverse=True)
-        if len(valid_indices) >= total:
-            return False
+            total = len(self._doc)
+            valid_indices = sorted(list(set(idx for idx in page_indices if 0 <= idx < total)), reverse=True)
+            if len(valid_indices) >= total:
+                return False
 
-        try:
-            for idx in valid_indices:
-                self._doc.delete_page(idx)
-            self._is_modified = True
-            self._sync_base_doc_bytes()
-            return True
-        except Exception:
-            return False
+            try:
+                for idx in valid_indices:
+                    self._doc.delete_page(idx)
+                self._is_modified = True
+                return True
+            except Exception:
+                return False
 
     def insert_blank_page(self, page_index: int, width: float = 595.0, height: float = 842.0) -> bool:
         """
@@ -309,19 +307,19 @@ class PdfDocument:
         @param height 页面高度（点数 pt），默认 842.0 (A4)
         @return 插入是否成功
         """
-        if not self.is_open or self._doc is None:
-            return False
-        total = len(self._doc)
-        if not (0 <= page_index <= total):
-            return False
+        with self._lock:
+            if not self.is_open or self._doc is None:
+                return False
+            total = len(self._doc)
+            if not (0 <= page_index <= total):
+                return False
 
-        try:
-            self._doc.new_page(pno=page_index, width=width, height=height)
-            self._is_modified = True
-            self._sync_base_doc_bytes()
-            return True
-        except Exception:
-            return False
+            try:
+                self._doc.new_page(pno=page_index, width=width, height=height)
+                self._is_modified = True
+                return True
+            except Exception:
+                return False
 
     def insert_image(
         self,
@@ -557,9 +555,11 @@ class PdfDocument:
         save_path = os.path.abspath(save_path)
         try:
             active_layers = self.image_layers.get_all_layers()
-            # 若有图片图层且有纯净底本镜像，从底本输出带图片的全新文档
-            if active_layers and self._base_doc_bytes is not None:
-                export_doc = pymupdf.open(stream=self._base_doc_bytes, filetype="pdf")
+            # 若有图片图层，从当前底本文档按需生成带图片的导出副本
+            if active_layers:
+                with self._lock:
+                    doc_bytes = self._doc.tobytes()
+                export_doc = pymupdf.open(stream=doc_bytes, filetype="pdf")
                 for layer in active_layers:
                     if 0 <= layer.page_index < len(export_doc):
                         page = export_doc[layer.page_index]
@@ -610,13 +610,14 @@ class PdfDocument:
         """
         安全关闭当前打开的 PDF 文档并释放底层资源。
         """
-        if self._doc is not None and not self._doc.is_closed:
-            try:
-                self._doc.close()
-            except Exception:
-                pass
-        self._doc = None
-        self._base_doc_bytes = None
-        self._file_path = None
-        self._is_modified = False
-        self.image_layers.clear()
+        with self._lock:
+            if self._doc is not None and not self._doc.is_closed:
+                try:
+                    self._doc.close()
+                except Exception:
+                    pass
+            self._doc = None
+            self._base_doc_bytes = None
+            self._file_path = None
+            self._is_modified = False
+            self.image_layers.clear()

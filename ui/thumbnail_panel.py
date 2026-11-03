@@ -4,7 +4,8 @@
 多列与单列下流畅拖拽边缘自动平滑滚动及精准滚动插入到列表底部、以及右键页面操作上下文菜单。
 """
 
-from typing import Optional, Tuple
+import threading
+from typing import Optional, Tuple, List, Dict
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget, QListWidgetItem,
     QAbstractItemView, QMenu, QLabel, QHBoxLayout, QPushButton,
@@ -14,10 +15,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QIcon, QPixmap, QDrag, QCursor, QPainter, QColor, QPen, QBrush,
     QResizeEvent, QMouseEvent, QDragEnterEvent, QDragMoveEvent,
-    QDragLeaveEvent, QDropEvent
+    QDragLeaveEvent, QDropEvent, QImage, QTransform
 )
 from PySide6.QtCore import (
-    Qt, Signal, QSize, QPoint, QRect, QMimeData, QTimer, QModelIndex
+    Qt, Signal, QSize, QPoint, QRect, QMimeData, QTimer, QModelIndex,
+    QThread, QObject
 )
 from core.pdf_document import PdfDocument
 from assets.icons import IconLibrary
@@ -27,7 +29,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
     """
     高清晰度自适应缩略图卡片项渲染委托。
     根据当前视口宽度及响应式多列布局结果绘制合适尺寸的缩略图卡片，
-    并负责渲染现代卡片外框、真实页面缩略图、拟真纸张边缘、页码标签及拖拽指示标记。
+    并负责渲染现代卡片外框、真实页面缩略图、拟真纸张边缘、骨架占位屏、页码标签及拖拽指示标记。
     """
 
     def __init__(self, parent: Optional["ThumbnailListWidget"] = None) -> None:
@@ -54,6 +56,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         """
         自适应绘制缩略图卡片、纸张图层、页码及多列拖拽目标指示标记。
+        支持骨架屏占位渲染，彻底消除大量图片高频重绘时的 CPU 算力消耗。
 
         @param painter 绘图对象
         @param option 视图项渲染选项
@@ -100,7 +103,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
         painter.setBrush(QBrush(bg_color))
         painter.drawRoundedRect(card_rect, 6, 6)
 
-        # 2. 绘制页面缩略图
+        # 2. 绘制页面缩略图（已加载绘制真实位图，未加载绘制骨架占位纸张）
         thumb_area = QRect(
             card_rect.left() + 6,
             card_rect.top() + 6,
@@ -130,6 +133,31 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.setPen(QPen(paper_border, 1))
             painter.drawRect(draw_rect.adjusted(-1, -1, 1, 1))
             painter.drawPixmap(draw_rect, scaled)
+        else:
+            # 尚未加载缩略图时绘制高保真拟真纸张骨架占位
+            aspect_ratio = index.data(Qt.UserRole + 2) or 1.414
+            target_w = thumb_area.width()
+            target_h = int(target_w * aspect_ratio)
+            if target_h > thumb_area.height():
+                target_h = thumb_area.height()
+                target_w = int(target_h / aspect_ratio)
+
+            draw_x = thumb_area.left() + (thumb_area.width() - target_w) // 2
+            draw_y = thumb_area.top() + (thumb_area.height() - target_h) // 2
+            draw_rect = QRect(draw_x, draw_y, max(20, target_w), max(20, target_h))
+
+            skeleton_bg = QColor("#334155") if is_dark else QColor("#F8FAFC")
+            skeleton_border = QColor("#475569") if is_dark else QColor("#E2E8F0")
+            painter.setPen(QPen(skeleton_border, 1, Qt.DashLine))
+            painter.setBrush(QBrush(skeleton_bg))
+            painter.drawRoundedRect(draw_rect, 3, 3)
+
+            # 居中轻量页码标记
+            painter.setPen(QPen(QColor("#64748B") if is_dark else QColor("#94A3B8"), 1))
+            sk_font = painter.font()
+            sk_font.setPointSize(8)
+            painter.setFont(sk_font)
+            painter.drawText(draw_rect, Qt.AlignCenter, f"P.{index.row() + 1}")
 
         # 3. 绘制页码文本
         text_rect = QRect(
@@ -183,6 +211,105 @@ class ThumbnailDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class ThumbnailRenderWorker(QThread):
+    """
+    缩略图后台异步光栅化工作线程。
+    在后台线程按优先级（当前视口可见范围优先）光栅化低分辨率页面位图，
+    通过 Qt 信号无锁推送给主线程，彻底释放 UI 主线程的渲染卡顿。
+    """
+
+    thumbnail_ready = Signal(int, QImage)  # (page_index, rendered_qimage)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        """
+        初始化缩略图工作线程。
+
+        @param parent 父 QObject 实例
+        """
+        super().__init__(parent)
+        self._doc: Optional[PdfDocument] = None
+        self._queue: List[int] = []
+        self._queue_lock = threading.Lock()
+        self._condition = threading.Condition(self._queue_lock)
+        self._is_running: bool = True
+        self._current_gen: int = 0
+
+    def set_document(self, doc: Optional[PdfDocument]) -> None:
+        """
+        设置或切换当前工作的 PDF 文档实体。
+
+        @param doc 目标 PDF 文档对象；若关闭文档则传入 None
+        """
+        with self._condition:
+            self._doc = doc
+            self._queue.clear()
+            self._current_gen += 1
+            self._condition.notify_all()
+
+    def request_pages(self, page_indices: List[int], priority: bool = True) -> None:
+        """
+        请求后台光栅化指定的一组页面缩略图。
+
+        @param page_indices 需要加载的页面 0-based 索引列表
+        @param priority 是否高优先级排在队列头部（视口内可见页为 True）
+        """
+        if not page_indices or self._doc is None or not self._doc.is_open:
+            return
+
+        with self._condition:
+            new_indices = [idx for idx in page_indices if idx not in self._queue]
+            if not new_indices:
+                return
+            if priority:
+                self._queue = new_indices + self._queue
+            else:
+                self._queue.extend(new_indices)
+            self._condition.notify_all()
+
+    def stop(self) -> None:
+        """
+        安全终止工作线程执行。
+        """
+        with self._condition:
+            self._is_running = False
+            self._queue.clear()
+            self._condition.notify_all()
+        self.wait(1000)
+
+    def run(self) -> None:
+        """
+        工作线程的主循环，从优先级队列中依次提取页面进行低 DPI 光栅化。
+        """
+        while True:
+            with self._condition:
+                while self._is_running and not self._queue:
+                    self._condition.wait()
+                if not self._is_running:
+                    break
+                page_idx = self._queue.pop(0)
+                gen = self._current_gen
+                doc = self._doc
+
+            if doc is None or not doc.is_open or page_idx < 0 or page_idx >= doc.page_count:
+                continue
+
+            # 使用 36 DPI 渲染（约 150x212 px，速度极快且保真）
+            qimage = doc.render_page_pixmap(page_idx, dpi=36)
+            if qimage is not None:
+                with self._condition:
+                    if gen == self._current_gen and self._is_running:
+                        self.thumbnail_ready.emit(page_idx, qimage)
+
+    def __del__(self) -> None:
+        """
+        析构函数，停止后台工作线程。
+        """
+        try:
+            self.stop()
+        except Exception:
+            pass
+
+
 class ThumbnailListWidget(QListWidget):
     """
     支持默认单列大图显示、根据容器宽度智能分列与拖拽边缘平滑自动滚动的缩略图列表控件。
@@ -191,6 +318,7 @@ class ThumbnailListWidget(QListWidget):
     """
 
     page_moved = Signal(int, int)  # 信号参数：(from_index, to_index)
+    visible_range_changed = Signal(int, int)  # 信号参数：(first_visible_row, last_visible_row)
     MIME_PAGE = "application/x-pdf-page-index"
     AUTO_SCROLL_MARGIN = 80  # 视口上下边缘触发自动滚动的阈值区域（像素，扩大感应区提升丝滑度）
 
@@ -223,6 +351,13 @@ class ThumbnailListWidget(QListWidget):
         self._drag_start_item: Optional[QListWidgetItem] = None
         self._drag_start_pos: QPoint = QPoint()
 
+        # 视口防抖滚动检测定时器
+        self._scroll_debounce_timer = QTimer(self)
+        self._scroll_debounce_timer.setSingleShot(True)
+        self._scroll_debounce_timer.setInterval(40)
+        self._scroll_debounce_timer.timeout.connect(self._on_scroll_debounced)
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+
         # 拖拽与自动滚动状态控制
         self._is_layouting: bool = False
         self._is_dragging: bool = False
@@ -233,6 +368,43 @@ class ThumbnailListWidget(QListWidget):
         self._auto_scroll_timer: QTimer = QTimer(self)
         self._auto_scroll_timer.setInterval(20)
         self._auto_scroll_timer.timeout.connect(self._on_auto_scroll_timer)
+
+    def _on_scroll_changed(self, value: int) -> None:
+        """
+        滚动条数值改变槽函数，触发防抖视口检测。
+
+        @param value 滚动条当前数值
+        """
+        self._scroll_debounce_timer.start(40)
+
+    def _on_scroll_debounced(self) -> None:
+        """
+        滚动停止后的防抖回调，计算当前可视范围并发射 visible_range_changed 信号。
+        """
+        first_row, last_row = self.get_visible_range()
+        if first_row >= 0 and last_row >= 0:
+            self.visible_range_changed.emit(first_row, last_row)
+
+    def get_visible_range(self) -> Tuple[int, int]:
+        """
+        计算当前视口内可见的缩略图起始与结束行号。
+
+        @return 包含 (first_row, last_row) 的元组；若为空则返回 (-1, -1)
+        """
+        count = self.count()
+        if count == 0:
+            return (-1, -1)
+
+        vp_h = self.viewport().height()
+        top_idx = self.indexAt(QPoint(10, 10)).row()
+        bot_idx = self.indexAt(QPoint(10, max(10, vp_h - 10))).row()
+
+        if top_idx == -1:
+            top_idx = 0
+        if bot_idx == -1:
+            bot_idx = min(top_idx + 15, count - 1)
+
+        return (min(top_idx, bot_idx), max(top_idx, bot_idx))
 
     @property
     def current_columns(self) -> int:
@@ -348,6 +520,7 @@ class ThumbnailListWidget(QListWidget):
         """
         super().resizeEvent(event)
         self.update_grid_layout()
+        self._scroll_debounce_timer.start(40)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """
@@ -659,6 +832,11 @@ class ThumbnailPanel(QWidget):
         @param parent 包含该面板的父组件
         """
         super().__init__(parent)
+        self._cached_pages: Dict[int, bool] = {}
+        self.MAX_CACHED_THUMBNAILS: int = 80
+        self.worker = ThumbnailRenderWorker(self)
+        self.worker.thumbnail_ready.connect(self._on_thumbnail_ready)
+        self.worker.start()
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -702,22 +880,220 @@ class ThumbnailPanel(QWidget):
         self.list_widget = ThumbnailListWidget(self)
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         self.list_widget.page_moved.connect(self._on_page_moved)
+        self.list_widget.visible_range_changed.connect(self._on_visible_range_changed)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.list_widget)
 
+    def _on_visible_range_changed(self, first_row: int, last_row: int) -> None:
+        """
+        视口范围改变时触发请求可见缩略图。
+
+        @param first_row 视口内起始行
+        @param last_row 视口内结束行
+        """
+        count = self.list_widget.count()
+        if count == 0:
+            return
+
+        start = max(0, first_row - 4)
+        end = min(count - 1, last_row + 4)
+        needed = []
+        for i in range(start, end + 1):
+            item = self.list_widget.item(i)
+            if item is not None and item.data(Qt.UserRole + 1) is None:
+                needed.append(i)
+
+        if needed:
+            self.worker.request_pages(needed, priority=True)
+
+    def _on_thumbnail_ready(self, page_index: int, qimage: QImage) -> None:
+        """
+        后台线程渲染完毕单个缩略图的回调。
+
+        @param page_index 页面索引
+        @param qimage 渲染生成的 QImage
+        """
+        if not (0 <= page_index < self.list_widget.count()):
+            return
+        item = self.list_widget.item(page_index)
+        if item is None:
+            return
+
+        pixmap = QPixmap.fromImage(qimage)
+        item.setData(Qt.UserRole + 1, pixmap)
+        self._cached_pages[page_index] = True
+
+        if len(self._cached_pages) > self.MAX_CACHED_THUMBNAILS:
+            self._evict_distant_thumbnails()
+
+        # 触发视口单项局部重绘
+        self.list_widget.viewport().update(self.list_widget.visualItemRect(item))
+
+    def _evict_distant_thumbnails(self) -> None:
+        """
+        根据当前视口位置淘汰距离最远的已缓存缩略图，将显存锁定在有界阈值内。
+        """
+        first_vis, last_vis = self.list_widget.get_visible_range()
+        mid_vis = (first_vis + last_vis) // 2 if first_vis >= 0 else 0
+
+        # 按与视口中心距离倒序排序
+        sorted_pages = sorted(self._cached_pages.keys(), key=lambda p: abs(p - mid_vis), reverse=True)
+        to_evict = sorted_pages[:20]
+        for p in to_evict:
+            self._cached_pages.pop(p, None)
+            item = self.list_widget.item(p)
+            if item is not None:
+                item.setData(Qt.UserRole + 1, None)
+
+    def rotate_page_thumbnail(self, page_index: int, angle: int) -> None:
+        """
+        局部增量更新单个页面的缩略图旋转状态。
+        无需重新全量加载整个列表，优先瞬时变换已有位图并调度后台高清重绘。
+
+        @param page_index 目标页面索引（从 0 开始）
+        @param angle 旋转度数（如 90 或 270 度）
+        """
+        if not (0 <= page_index < self.list_widget.count()):
+            return
+        item = self.list_widget.item(page_index)
+        if item is None:
+            return
+
+        # 瞬时 2D 坐标系旋转已有位图，达到 0ms 视觉响应
+        pixmap = item.data(Qt.UserRole + 1)
+        if isinstance(pixmap, QPixmap) and not pixmap.isNull():
+            transform = QTransform().rotate(angle)
+            rotated_pixmap = pixmap.transformed(transform, Qt.SmoothTransformation)
+            item.setData(Qt.UserRole + 1, rotated_pixmap)
+
+        # 更新宽高比
+        aspect = item.data(Qt.UserRole + 2) or 1.414
+        if angle in (90, 270):
+            aspect = 1.0 / aspect if aspect > 0 else 1.414
+            item.setData(Qt.UserRole + 2, aspect)
+
+        # 局部重绘该项
+        self.list_widget.viewport().update(self.list_widget.visualItemRect(item))
+
+        # 排队通知后台线程按真实 PDF 重新光栅化此页
+        self.worker.request_pages([page_index], priority=True)
+
+    def move_thumbnail_item(self, from_index: int, to_index: int) -> None:
+        """
+        局部增量移动单个页面缩略图项的顺序并同步更新页码标签与缓存键映射。
+        纯 O(1) 链表项位移，彻底消除几百页全量重新渲染的卡顿。
+
+        @param from_index 原始行索引
+        @param to_index 目标行索引
+        """
+        count = self.list_widget.count()
+        if not (0 <= from_index < count and 0 <= to_index < count) or from_index == to_index:
+            return
+
+        self.list_widget.blockSignals(True)
+        item = self.list_widget.takeItem(from_index)
+        self.list_widget.insertItem(to_index, item)
+
+        # 刷新受影响区间的页码标签与 UserRole 索引
+        start_idx = min(from_index, to_index)
+        end_idx = max(from_index, to_index)
+        for i in range(start_idx, end_idx + 1):
+            cur_item = self.list_widget.item(i)
+            if cur_item is not None:
+                cur_item.setText(f"第 {i + 1} 页")
+                cur_item.setData(Qt.UserRole, i)
+
+        # 重构 LRU 缓存的 key 索引映射
+        new_cached = {}
+        for i in range(count):
+            it = self.list_widget.item(i)
+            if it is not None and it.data(Qt.UserRole + 1) is not None:
+                new_cached[i] = True
+        self._cached_pages = new_cached
+
+        self.list_widget.setCurrentRow(to_index)
+        self.list_widget.blockSignals(False)
+        self.list_widget.viewport().update()
+
+    def delete_thumbnail_item(self, page_index: int) -> None:
+        """
+        局部增量删除单个页面缩略图项，并自动重排后续项的页码标签。
+
+        @param page_index 待删除的页面索引
+        """
+        if not (0 <= page_index < self.list_widget.count()):
+            return
+
+        self.list_widget.blockSignals(True)
+        item = self.list_widget.takeItem(page_index)
+        del item
+
+        # 更新后续项的页码文字与 UserRole
+        for i in range(page_index, self.list_widget.count()):
+            cur_item = self.list_widget.item(i)
+            if cur_item is not None:
+                cur_item.setText(f"第 {i + 1} 页")
+                cur_item.setData(Qt.UserRole, i)
+
+        new_cached = {}
+        for i in range(self.list_widget.count()):
+            it = self.list_widget.item(i)
+            if it is not None and it.data(Qt.UserRole + 1) is not None:
+                new_cached[i] = True
+        self._cached_pages = new_cached
+
+        self.list_widget.blockSignals(False)
+        self.list_widget.viewport().update()
+
+    def insert_thumbnail_item(self, page_index: int, aspect_ratio: float = 1.414) -> None:
+        """
+        在指定位置局部增量插入一张新页面缩略图项，并更新后续页码标签。
+
+        @param page_index 插入的目标索引
+        @param aspect_ratio 页面宽高比，默认为 1.414
+        """
+        self.list_widget.blockSignals(True)
+        item = QListWidgetItem(f"第 {page_index + 1} 页")
+        item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+        item.setData(Qt.UserRole, page_index)
+        item.setData(Qt.UserRole + 1, None)
+        item.setData(Qt.UserRole + 2, aspect_ratio)
+
+        self.list_widget.insertItem(page_index, item)
+
+        # 更新后续项的页码与 UserRole
+        for i in range(page_index + 1, self.list_widget.count()):
+            cur_item = self.list_widget.item(i)
+            if cur_item is not None:
+                cur_item.setText(f"第 {i + 1} 页")
+                cur_item.setData(Qt.UserRole, i)
+
+        self.list_widget.setCurrentRow(page_index)
+        self.list_widget.blockSignals(False)
+        self.list_widget.viewport().update()
+
+        # 请求后台渲染该新插入页
+        self.worker.request_pages([page_index], priority=True)
+
     def load_thumbnails(self, pdf_doc: PdfDocument) -> None:
         """
         根据当前 PDF 文档全量刷新渲染缩略图列表。
-        记录真实物理纵横比与高清晰度位图，并触发自适应分列排版（默认单列）。
+        采用视口优先异步懒加载架构：毫秒级创建全量骨架 Item，并在后台按需光栅化，
+        确保几百页长 PDF 秒级打开且绝不卡顿 UI 主线程。
 
         @param pdf_doc 当前活动的 PDF 文档实体
         """
+        self._cached_pages.clear()
+        self.worker.set_document(pdf_doc)
         self.list_widget.clear()
         if not pdf_doc.is_open:
             return
 
         total_pages = pdf_doc.page_count
+        if total_pages == 0:
+            return
+
         aspect_ratios = []
         for i in range(total_pages):
             page_size = pdf_doc.get_page_size(i)
@@ -730,28 +1106,45 @@ class ThumbnailPanel(QWidget):
         if aspect_ratios:
             self.list_widget._base_aspect_ratio = aspect_ratios[0]
 
+        # 毫秒级生成全量骨架 Item（无昂贵的光栅化阻塞）
         for i in range(total_pages):
             aspect_ratio = aspect_ratios[i]
-            qimage = pdf_doc.render_page_pixmap(i, dpi=120)
-            if qimage is not None:
-                pixmap = QPixmap.fromImage(qimage)
-                scaled_pixmap = pixmap.scaled(
-                    130, max(20, int(130 * aspect_ratio)),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                item = QListWidgetItem(QIcon(scaled_pixmap), f"第 {i + 1} 页")
-                item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
-                item.setData(Qt.UserRole, i)
-                item.setData(Qt.UserRole + 1, pixmap)
-                item.setData(Qt.UserRole + 2, aspect_ratio)
-                self.list_widget.addItem(item)
+            item = QListWidgetItem(f"第 {i + 1} 页")
+            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+            item.setData(Qt.UserRole, i)
+            item.setData(Qt.UserRole + 1, None)  # 尚未加载位图
+            item.setData(Qt.UserRole + 2, aspect_ratio)
+            self.list_widget.addItem(item)
 
         # 触发响应式分列排版（默认宽度下保持为 1 列表显示）
         self.list_widget.update_grid_layout()
 
         if total_pages > 0:
             self.list_widget.setCurrentRow(0)
+
+        # 优先排队加载首屏可视前 15 页
+        initial_pages = list(range(min(15, total_pages)))
+        self.worker.request_pages(initial_pages, priority=True)
+
+    def closeEvent(self, event) -> None:
+        """
+        窗口关闭事件处理，安全终止后台工作线程。
+
+        @param event 关闭事件对象
+        """
+        if hasattr(self, "worker") and self.worker.isRunning():
+            self.worker.stop()
+        super().closeEvent(event)
+
+    def __del__(self) -> None:
+        """
+        析构函数，停止后台工作线程。
+        """
+        try:
+            if hasattr(self, "worker") and self.worker.isRunning():
+                self.worker.stop()
+        except Exception:
+            pass
 
     @property
     def current_page_index(self) -> int:

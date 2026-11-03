@@ -51,7 +51,10 @@ class PageMoveCommand(Command):
         """
         success = self._doc.move_page(self._from_idx, self._to_idx)
         if success:
-            self._main_window.refresh_views(self._to_idx)
+            self._main_window.thumbnail_panel.move_thumbnail_item(self._from_idx, self._to_idx)
+            self._main_window.thumbnail_panel.set_current_page(self._to_idx)
+            self._main_window.canvas_view.display_page(self._doc, self._to_idx)
+            self._main_window._update_status_bar()
         return success
 
     def undo(self) -> bool:
@@ -62,7 +65,10 @@ class PageMoveCommand(Command):
         """
         success = self._doc.move_page(self._to_idx, self._from_idx)
         if success:
-            self._main_window.refresh_views(self._from_idx)
+            self._main_window.thumbnail_panel.move_thumbnail_item(self._to_idx, self._from_idx)
+            self._main_window.thumbnail_panel.set_current_page(self._from_idx)
+            self._main_window.canvas_view.display_page(self._doc, self._from_idx)
+            self._main_window._update_status_bar()
         return success
 
 
@@ -829,13 +835,17 @@ class MainWindow(QMainWindow):
     def _on_thumbnail_rotate(self, page_index: int, angle: int) -> None:
         """
         响应右键菜单指定页面旋转。
+        采用增量式单页局部刷新，彻底避免重载整个缩略图列表。
 
         @param page_index 目标页面索引
         @param angle 旋转角度
         """
         success = self._doc.rotate_page(page_index, angle)
         if success:
-            self.refresh_views(page_index)
+            self.thumbnail_panel.rotate_page_thumbnail(page_index, angle)
+            if self.canvas_view.current_page_index == page_index:
+                self.canvas_view.display_page(self._doc, page_index)
+            self._update_status_bar()
 
     def _on_insert_blank_page(self) -> None:
         """
@@ -851,7 +861,10 @@ class MainWindow(QMainWindow):
         target_idx = curr + 1
         success = self._doc.insert_blank_page(target_idx)
         if success:
-            self.refresh_views(target_idx)
+            self.thumbnail_panel.insert_thumbnail_item(target_idx)
+            self.thumbnail_panel.set_current_page(target_idx)
+            self.canvas_view.display_page(self._doc, target_idx)
+            self._update_status_bar()
             self.lbl_status.setText(f"已在第 {target_idx + 1} 页插入空白页！")
 
     def _on_thumbnail_insert(self, target_index: int) -> None:
@@ -862,7 +875,10 @@ class MainWindow(QMainWindow):
         """
         success = self._doc.insert_blank_page(target_index)
         if success:
-            self.refresh_views(target_index)
+            self.thumbnail_panel.insert_thumbnail_item(target_index)
+            self.thumbnail_panel.set_current_page(target_index)
+            self.canvas_view.display_page(self._doc, target_index)
+            self._update_status_bar()
 
     def _on_delete_page(self) -> None:
         """
@@ -886,8 +902,11 @@ class MainWindow(QMainWindow):
         if msg_box.clickedButton() == btn_confirm:
             success = self._doc.delete_page(curr)
             if success:
-                new_idx = max(0, curr - 1)
-                self.refresh_views(new_idx)
+                self.thumbnail_panel.delete_thumbnail_item(curr)
+                new_idx = max(0, min(curr, self._doc.page_count - 1))
+                self.thumbnail_panel.set_current_page(new_idx)
+                self.canvas_view.display_page(self._doc, new_idx)
+                self._update_status_bar()
                 self.lbl_status.setText("页面已成功删除！")
 
     def _on_thumbnail_delete(self, page_index: int) -> None:
@@ -902,8 +921,11 @@ class MainWindow(QMainWindow):
 
         success = self._doc.delete_page(page_index)
         if success:
-            new_idx = max(0, page_index - 1)
-            self.refresh_views(new_idx)
+            self.thumbnail_panel.delete_thumbnail_item(page_index)
+            new_idx = max(0, min(page_index, self._doc.page_count - 1))
+            self.thumbnail_panel.set_current_page(new_idx)
+            self.canvas_view.display_page(self._doc, new_idx)
+            self._update_status_bar()
 
     def _on_thumbnail_extract(self, page_index: int) -> None:
         """
@@ -1452,6 +1474,9 @@ class MainWindow(QMainWindow):
 
         @param event 关闭事件
         """
+        if hasattr(self, "thumbnail_panel") and hasattr(self.thumbnail_panel, "worker"):
+            self.thumbnail_panel.worker.stop()
+
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
             self._doc.close()
             event.accept()

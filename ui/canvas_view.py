@@ -508,8 +508,8 @@ class PdfCanvasView(QGraphicsView):
 
         # 1 pt = 1/72 inch，因此最佳 DPI = 72 * view_scale * dpr
         target_dpi = int(72.0 * view_scale * dpr)
-        # 下限 72 DPI，上限 600 DPI，足以满足视网膜极致锐度并防止极端大图占用过多内存
-        return max(72, min(target_dpi, 600))
+        # 下限 72 DPI，上限 250 DPI，足以满足视网膜清晰锐度并防止低配机器极端大图占用过多内存
+        return max(72, min(target_dpi, 250))
 
     def _schedule_high_res_render(self) -> None:
         """
